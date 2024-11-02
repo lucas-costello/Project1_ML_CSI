@@ -1,0 +1,270 @@
+import torch
+import torch.nn as nn
+import torch.multiprocessing as mp
+import torchvision
+import torchvision.transforms as transforms
+from torch.utils.data import DataLoader
+import time
+import torch.optim as optim
+import matplotlib.pyplot as plt
+
+# Device Configuration
+device = torch.device('cuda')
+print(f'Using device: {device}')
+
+# Hyper-Parameters
+num_epochs = 150  # Number of training epochs to be analyzed
+batch_size = 32
+initial_learning_rate = 0.001   # Initial learning rate
+step_size = 20   # Step size for StepLR
+gamma = 0.1  # Decay rate for StepLR
+gamma_exp = 0.99  # Decay rate for ExponentialLR
+T_max = 50  # Maximum number of iterations for CosineAnnealingLR
+momentum = 0.9  # Momentum for SGD
+beta1 = 0.9  # Adam hyperparameter beta1
+beta2 = 0.999  # Adam hyperparameter beta2
+# lambda_l2 = 0.0001  # Adjusted L2 regularization for better generalization  # L2 regularization lambda value
+alpha = 0.99  # Smoothing constant for RMSprop
+eps = 1e-8  # Epsilon value for numerical stability in Adam and RMSprop
+p_dropout = 0.5  # Dropout probability
+
+learning_rate_decay_algorithms = ['StepLR', 'ExponentialLR', 'CosineAnnealingLR']  # Learning rate decay algorithms
+regularization_methods = ['L2', 'Dropout']  # Regularization methods to analyze
+optimization_algorithms = ['SGD with momentum', 'RMSprop', 'Adam']  # Optimization algorithms to analyze
+
+# Data Transforms
+transform = transforms.Compose([
+    transforms.RandomCrop(32, padding=4),
+    transforms.RandomHorizontalFlip(),
+    transforms.RandomRotation(degrees=15), # Additional data augmentation method
+    transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.9, 1.1), shear=5), # Additional data augmentation method
+    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),  # Additional data augmentation method
+    transforms.ToTensor(),
+    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+])
+
+# CIFAR10 Datasets
+train_dataset = torchvision.datasets.CIFAR10(root='./data', train=True,
+                                             download=True, transform=transform)
+test_dataset = torchvision.datasets.CIFAR10(root='./data', train=False,
+                                            download=True, transform=transform)
+
+# Data Loaders
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
+test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+
+# Model Definition
+class CIFAR10ResNet(nn.Module):
+    def __init__(self):
+        super(CIFAR10ResNet, self).__init__()
+
+        # Initial Convolutional Layer
+        self.conv1 = nn.Conv2d(in_channels=3, out_channels=64, kernel_size=3, stride=1, padding=1).to(device)
+        self.bn1 = nn.BatchNorm2d(64).to(device)
+
+        # Residual Blocks
+        self.res_block1 = self._make_residual_block(64, 64, stride=1)
+        self.res_block2 = self._make_residual_block(64, 128, stride=2)
+        self.res_block3 = self._make_residual_block(128, 256, stride=2)
+        self.res_block4 = self._make_residual_block(256, 512, stride=2)
+        self.res_block5 = self._make_residual_block(512, 256, stride=1)
+        self.res_block6 = self._make_residual_block(256, 128, stride=1)
+        self.res_block7 = self._make_residual_block(128, 64, stride=1)
+
+        # Fully Connected Layer
+        self.fc = nn.Linear(64, 10).to(device)
+
+        self.relu = nn.ReLU(inplace=True).to(device)
+        self.pool = nn.AdaptiveAvgPool2d((1, 1)).to(device)
+
+    def _make_residual_block(self, in_channels, out_channels, stride):
+        layers = []
+        layers.append(nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1).to(device))
+        layers.append(nn.BatchNorm2d(out_channels).to(device))
+        layers.append(nn.ReLU(inplace=True).to(device))
+        layers.append(nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1).to(device))
+        layers.append(nn.BatchNorm2d(out_channels).to(device))
+
+        # Shortcut connection to match dimensions if needed
+        shortcut = nn.Identity().to(device)
+        if in_channels != out_channels or stride != 1:
+            shortcut = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, padding=0).to(device),
+                nn.BatchNorm2d(out_channels).to(device)
+            )
+
+        return nn.Sequential(*layers).to(device), shortcut
+
+    def forward(self, x):
+        # Initial Convolutional Layer
+        x = self.relu(self.bn1(self.conv1(x)))
+
+        # Residual Block 1
+        out, shortcut = self.res_block1
+        residual = shortcut(x)
+        x = self.relu(out(x) + residual)
+
+        # Residual Block 2
+        out, shortcut = self.res_block2
+        residual = shortcut(x)
+        x = self.relu(out(x) + residual)
+
+        # Residual Block 3
+        out, shortcut = self.res_block3
+        residual = shortcut(x)
+        x = self.relu(out(x) + residual)
+
+        # Residual Block 4
+        out, shortcut = self.res_block4
+        residual = shortcut(x)
+        x = self.relu(out(x) + residual)
+
+        # Residual Block 5
+        out, shortcut = self.res_block5
+        residual = shortcut(x)
+        x = self.relu(out(x) + residual)
+
+        # Residual Block 6
+        out, shortcut = self.res_block6
+        residual = shortcut(x)
+        x = self.relu(out(x) + residual)
+
+        # Residual Block 7
+        out, shortcut = self.res_block7
+        residual = shortcut(x)
+        x = self.relu(out(x) + residual)
+
+        # Pooling and Fully Connected Layer
+        x = self.pool(x)
+        x = x.view(x.size(0), -1)
+        x = self.fc(x)
+
+        return x
+
+# Instantiate the model
+model = CIFAR10ResNet().to(device)
+
+# Loss, Optimizer, and Scheduler
+criterion = nn.CrossEntropyLoss()
+optimizer = torch.optim.Adam(model.parameters(), lr=initial_learning_rate, weight_decay=lambda_l2)      # Reset to custom Adam
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs) # Reset to custom scheduler
+
+# Training Loop
+train_loss_list = []
+train_acc_list = []
+test_acc_list = []
+iteration_loss_list = []
+learning_rate_list = []
+
+def accuracy(output, target):
+    _, predicted = torch.max(output, 1)
+    correct = (predicted == target).sum().item()
+    return correct / target.size(0)
+
+def train(model, train_loader, criterion, optimizer, lambda_l2):
+    model.train()
+    running_loss = 0.0
+    correct_train = 0
+    total_train = 0
+    total_step = len(train_loader)
+
+    for i, (images, labels) in enumerate(train_loader):
+        images, labels = images.to(device), labels.to(device)
+
+        # Forward pass
+        outputs = model(images)
+        loss = criterion(outputs, labels)
+        iteration_loss_list.append(loss.item())
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        running_loss += loss.item()
+        correct_train += accuracy(outputs, labels) * labels.size(0)
+        total_train += labels.size(0)
+
+        if (i + 1) % 100 == 0:
+            print(f'Epoch [{epoch+1}/{num_epochs}], Step [{i+1}/{total_step}], Loss: {loss.item():.4f}, Accuracy: {correct_train / total_train:.4f}')
+
+    # Record learning rate
+    learning_rate_list.append(optimizer.param_groups[0]['lr'])  # change back to learning_rate_list.append(optimizer.lr)
+
+    scheduler.step()
+    train_loss = running_loss / len(train_loader)
+    train_acc = correct_train / total_train
+    return train_loss, train_acc
+
+def evaluate(model, test_loader):
+    model.eval()
+    correct_test = 0
+    total_test = 0
+    with torch.no_grad():
+        for images, labels in test_loader:
+            images, labels = images.to(device), labels.to(device)
+            outputs = model(images)
+            correct_test += accuracy(outputs, labels) * labels.size(0)
+            total_test += labels.size(0)
+
+    test_acc = correct_test / total_test
+    return test_acc
+
+for epoch in range(num_epochs):
+    # Warm-up phase
+    if epoch < 5:
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = initial_learning_rate * (epoch + 1) / 5
+    train_loss, train_acc = train(model, train_loader, criterion, optimizer, lambda_l2)
+    test_acc = evaluate(model, test_loader)
+
+    # Record metrics
+    train_loss_list.append(train_loss)
+    train_acc_list.append(train_acc)
+    test_acc_list.append(test_acc)
+
+    print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {train_loss:.4f}, Train Accuracy: {train_acc:.4f}, Test Accuracy: {test_acc:.4f}')
+
+# Plot Training Loss
+plt.figure(figsize=(10, 5))
+plt.plot(train_loss_list, label='Training Loss')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.title('Training Loss over Epochs')
+plt.legend()
+plt.show()
+
+# Plot Training Accuracy
+plt.figure(figsize=(10, 5))
+plt.plot(train_acc_list, label='Training Accuracy')
+plt.xlabel('Epoch')
+plt.ylabel('Accuracy')
+plt.title('Training Accuracy over Epochs')
+plt.legend()
+plt.show()
+
+# Plot Test Accuracy
+plt.figure(figsize=(10, 5))
+plt.plot(test_acc_list, label='Test Accuracy')
+plt.xlabel('Epoch')
+plt.ylabel('Accuracy')
+plt.title('Test Accuracy over Epochs')
+plt.legend()
+plt.show()
+
+# Plot Learning Rate
+plt.figure(figsize=(10, 5))
+plt.plot(learning_rate_list, label='Learning Rate')
+plt.xlabel('Epoch')
+plt.ylabel('Learning Rate')
+plt.title('Learning Rate over Epochs')
+plt.legend()
+plt.show()
+
+# Plotting Cost over Iterations
+plt.figure(figsize=(10, 5))
+plt.plot(iteration_loss_list, label='Cost over Iterations')
+plt.xlabel('Iteration')
+plt.ylabel('Loss')
+plt.title('Cost over Iterations')
+plt.legend()
+plt.show()
